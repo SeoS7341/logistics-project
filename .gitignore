@@ -1,4 +1,12 @@
 # .gitignore
 **/__pycache__/
 *.py[cod]
+
+# Excel files (Data)
 *.xlsx
+*.xls
+*.csv
+
+# Folder exclusion
+data/raw/
+data/processed/
