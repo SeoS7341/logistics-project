@@ -14,6 +14,9 @@ from etl.loader.neulpum import NeulpumLoader
 from etl.loader.wellstory import WellstoryLoader
 from etl.mapper import order_mapper
 from service.statistics_service import StatisticsService
+from service.slack_service import SlackService
+from service.anomaly_service import AnomalyService
+from config import Config
 
 # ==============================
 # 공통 저장 함수
@@ -155,7 +158,7 @@ def run_all(config: dict):
     # 1. Extract
     raw_dfs = extract(registry)
 
-    # 2. Transform (Staging)
+    # 2. Transform
     staging_df = transform(raw_dfs, config.get("target_date"))
 
     # 3. Load
@@ -164,15 +167,23 @@ def run_all(config: dict):
     # 4. Domain Mapping
     orders = order_mapper.to_orders(staging_df)
 
-    # 5. Aggregate (Mart)
+    # 5. Aggregate
     mart = aggregate(staging_df)
 
-    # 🔥 6. KPI (Analytics Layer)
+    # 6. KPI
     kpi = StatisticsService.build_kpi(staging_df)
     save_kpi(kpi)
 
-    # 7. Post Process
+    # 7. Post Process (라벨)
     run_post_process(config)
+
+    # 8. 🔥 Anomaly Detection (핵심)
+    anomaly_service = AnomalyService()
+    # 👉 지금은 shipment 없으니까 None
+    anomalies = anomaly_service.detect(staging_df, None)
+
+    # 9. 🔥 저장 + Slack 알림
+    anomaly_service.process(anomalies)
 
     return orders, mart, kpi
     
