@@ -1,12 +1,21 @@
-# .gitignore
+# Python
 **/__pycache__/
 *.py[cod]
 
-# Excel files (Data)
+# Excel 기본 제외
 *.xlsx
 *.xls
 *.csv
 
-# Folder exclusion
+# RAW 데이터 (절대 금지)
 data/raw/
-data/processed/
+
+# processed 전체 제외
+data/processed/*
+
+# KPI 결과만 허용 (포트폴리오 핵심)
+!data/processed/kpi/
+!data/processed/kpi/*.xlsx
+
+# 환경변수 (중요)
+.env
