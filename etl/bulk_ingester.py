@@ -5,6 +5,7 @@ import shutil
 import datetime
 import numpy as np
 import re
+import uuid
 
 # -----------------------------
 # 경로 설정
@@ -34,6 +35,15 @@ def normalize_keys(d):
 
 
 # -----------------------------
+# 🔥 datetime 직렬화 처리 (핵심)
+# -----------------------------
+def serialize_value(v):
+    if isinstance(v, (datetime.date, datetime.datetime, pd.Timestamp)):
+        return v.isoformat()
+    return v
+
+
+# -----------------------------
 # CSV 인코딩 대응
 # -----------------------------
 def read_csv_with_encoding(file_path):
@@ -47,7 +57,7 @@ def read_csv_with_encoding(file_path):
 
 
 # -----------------------------
-# 🔥 normalized 추출
+# normalized 추출
 # -----------------------------
 def extract_normalized_fields(data):
     return {
@@ -58,6 +68,18 @@ def extract_normalized_fields(data):
         "barcode": data.get("상품바코드"),
         "order_no": data.get("OMS주문번호") or data.get("주문번호"),
     }
+
+
+# -----------------------------
+# 시스템 분류
+# -----------------------------
+def detect_system(filename):
+    if any(keyword in filename for keyword in ["씨제", "CJ", "TC", "장지"]):
+        return "CJ_FRESHWAY"
+    elif "푸드팡" in filename:
+        return "FOODPANG"
+    else:
+        return "LOGISTICS_ETC"
 
 
 # -----------------------------
@@ -74,14 +96,7 @@ def run_ingestion():
 
     for filename in files:
         file_path = os.path.join(RAW_DIR, filename)
-
-        # 시스템 분류
-        if any(keyword in filename for keyword in ["씨제", "CJ", "TC", "장지"]):
-            system_name = "CJ_FRESHWAY"
-        elif "푸드팡" in filename:
-            system_name = "FOODPANG"
-        else:
-            system_name = "LOGISTICS_ETC"
+        system_name = detect_system(filename)
 
         print(f"[*] 처리 중: {filename} ({system_name})")
 
@@ -93,13 +108,13 @@ def run_ingestion():
                 engine = 'xlrd' if filename.endswith('.xls') else 'openpyxl'
                 df = pd.read_excel(file_path, engine=engine)
 
-            # 2. 컬럼명 정제
+            # 2. 컬럼 정제
             df.columns = [clean_text(col) for col in df.columns]
 
-            # 🔥 3. 숫자 컬럼 제거 (0,1,2 같은 쓰레기 컬럼)
+            # 3. 숫자 컬럼 제거
             df = df.loc[:, ~df.columns.astype(str).str.match(r'^\d+$')]
 
-            # 4. 수치형 이상값 처리
+            # 4. 이상값 처리
             df = df.replace([np.inf, -np.inf], np.nan)
 
             # 5. 빈 행 제거
@@ -114,26 +129,30 @@ def run_ingestion():
             for _, row in df.iterrows():
                 raw_dict = row.to_dict()
 
+                # 🔥 직렬화 + 정제
                 cleaned_dict = normalize_keys({
-                    k: (None if pd.isna(v) else v)
+                    k: serialize_value(None if pd.isna(v) else v)
                     for k, v in raw_dict.items()
                 })
 
-                # 🔥 완전 빈 데이터 방어
+                # 완전 빈 row skip
                 if all(v is None for v in cleaned_dict.values()):
                     continue
 
-                # 🔥 normalized 생성
+                # normalized 생성
                 normalized = extract_normalized_fields(cleaned_dict)
 
-                # 🔥 핵심: 필수값 없으면 "버리는게 아니라 NULL 처리"
                 issue_type = None
                 if not normalized.get("product_code"):
                     normalized = None
                     issue_type = "DATA_MISSING"
 
+                # 🔥 trace_id 사전 생성 (핵심)
+                trace_id = str(uuid.uuid4())
+
                 payload = {
                     "system_name": system_name,
+                    "site_code": cleaned_dict.get("센터코드") or "UNKNOWN",
                     "mall_id": str(
                         cleaned_dict.get("공급업체")
                         or cleaned_dict.get("공급처명")
@@ -141,25 +160,28 @@ def run_ingestion():
                     ),
                     "data_type": "raw_upload",
 
-                    # 🔥 핵심 구조
                     "normalized": normalized,
 
                     "label_no": str(
                         (normalized.get("barcode") if normalized else None)
                         or cleaned_dict.get("라벨번호")
-                        or "N/A"
+                        or trace_id  # fallback
                     ),
                     "order_no": str(
                         (normalized.get("order_no") if normalized else None)
-                        or cleaned_dict.get("사방넷 상품코드")
-                        or "N/A"
+                        or cleaned_dict.get("주문번호")
+                        or "UNKNOWN_ORDER"
                     ),
 
-                    # 🔥 anomaly tagging
                     "issue_type": issue_type,
 
-                    # 🔥 원본 보존
-                    "extra_info": cleaned_dict
+                    # 🔥 trace_id 포함 (핵심)
+                    "trace_id": trace_id,
+
+                    "extra_info": {
+                        **cleaned_dict,
+                        "trace_id": trace_id
+                    }
                 }
 
                 try:
@@ -177,7 +199,7 @@ def run_ingestion():
 
             print(f"  [V] 성공: {success_count}건 / 실패: {fail_count}건")
 
-            # 7. 파일 이동
+            # 파일 이동
             today_folder = datetime.datetime.now().strftime("%Y-%m-%d")
             save_path = os.path.join(PROCESSED_DIR, today_folder)
             os.makedirs(save_path, exist_ok=True)
