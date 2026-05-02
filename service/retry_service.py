@@ -1,6 +1,6 @@
 # service/retry_service.py
 
-import datetime
+import json
 
 from db.repository_retry import (
     save_retry_history
@@ -8,66 +8,137 @@ from db.repository_retry import (
 
 from db.repository_ingestion import (
     get_ingestion_job_by_trace_id,
-    update_ingestion_job
+    update_ingestion_job,
+    increase_retry_count,
+    get_raw_payload_by_trace_id
+)
+
+from service.ingestion_service import (
+    process_raw_metadata
+)
+
+from common.constants.ingestion_status import (
+    STAGE_FAILED,
+    STATUS_FAIL,
+    STATUS_SUCCESS,
+    STATUS_DEAD,
+    MAX_RETRY
 )
 
 
-# =========================================
-# retry 이력 저장 + ingestion_job 상태 반영
-# =========================================
 def retry_failed_trace(
     db,
-    trace_id: str,
-    retry_message: str,
-    retry_status: str = "SUCCESS"
+    trace_id: str
 ):
 
-    # =========================================
-    # 현재 ingestion_job 조회
-    # =========================================
     job = get_ingestion_job_by_trace_id(
         db=db,
         trace_id=trace_id
     )
 
-    retry_count = 0
+    if not job:
+        raise ValueError(f"ingestion_job not found: {trace_id}")
 
-    if job:
-        retry_count = job[4] or 0
+    current_retry_count = job.retry_count
 
     # =========================================
-    # retry_history 저장
+    # MAX RETRY 초과
     # =========================================
-    save_retry_history(
+    if current_retry_count >= MAX_RETRY:
+
+        update_ingestion_job(
+            db=db,
+            trace_id=trace_id,
+            process_stage=STAGE_FAILED,
+            process_status=STATUS_DEAD,
+            retry_count=current_retry_count,
+            last_error="MAX RETRY EXCEEDED"
+        )
+
+        db.commit()
+
+        save_retry_history(
+            db=db,
+            trace_id=trace_id,
+            retry_status=STATUS_DEAD,
+            retry_message="MAX RETRY EXCEEDED"
+        )
+
+        db.commit()
+
+        return
+
+    # =========================================
+    # retry_count 증가
+    # =========================================
+    increase_retry_count(
         db=db,
-        trace_id=trace_id,
-        retry_status=retry_status,
-        retry_message=retry_message
+        trace_id=trace_id
     )
 
-    # =========================================
-    # ingestion_job 상태 업데이트
-    # =========================================
-    if retry_status == "SUCCESS":
-
-        update_ingestion_job(
-            db=db,
-            trace_id=trace_id,
-            process_stage="RETRY",
-            process_status="SUCCESS",
-            retry_count=retry_count,
-            last_error=None
-        )
-
-    else:
-
-        update_ingestion_job(
-            db=db,
-            trace_id=trace_id,
-            process_stage="RETRY",
-            process_status="FAIL",
-            retry_count=retry_count,
-            last_error=retry_message
-        )
-
     db.commit()
+
+    payload_result = get_raw_payload_by_trace_id(
+        db=db,
+        trace_id=trace_id
+    )
+
+    if not payload_result:
+        raise ValueError("raw_payload not found.")
+
+    payload = json.loads(payload_result[0])
+
+    try:
+
+        # =========================================
+        # 실제 replay
+        # =========================================
+        process_raw_metadata(
+            db=db,
+            payload=payload
+        )
+
+        save_retry_history(
+            db=db,
+            trace_id=trace_id,
+            retry_status=STATUS_SUCCESS,
+            retry_message="RETRY SUCCESS"
+        )
+
+        db.commit()
+
+    except Exception as e:
+
+        updated_job = get_ingestion_job_by_trace_id(
+            db=db,
+            trace_id=trace_id
+        )
+
+        retry_count = updated_job.retry_count
+
+        next_status = STATUS_FAIL
+
+        if retry_count >= MAX_RETRY:
+            next_status = STATUS_DEAD
+
+        update_ingestion_job(
+            db=db,
+            trace_id=trace_id,
+            process_stage=STAGE_FAILED,
+            process_status=next_status,
+            retry_count=retry_count,
+            last_error=str(e)
+        )
+
+        db.commit()
+
+        save_retry_history(
+            db=db,
+            trace_id=trace_id,
+            retry_status=next_status,
+            retry_message=str(e)
+        )
+
+        db.commit()
+
+        raise e

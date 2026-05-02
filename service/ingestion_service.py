@@ -5,7 +5,8 @@ import time
 from db.repository_ingestion import (
     save_unit_label,
     save_external_audit,
-    upsert_ingestion_job
+    create_ingestion_job,
+    update_ingestion_job
 )
 
 from service.trace_service import (
@@ -15,6 +16,22 @@ from service.trace_service import (
 
 from service.container_validation_service import (
     validate_required_fields
+)
+
+from service.master_validation_service import (
+    validate_master_data
+)
+
+from common.constants.ingestion_status import (
+    STAGE_RECEIVED,
+    STAGE_VALIDATED,
+    STAGE_MASTER_CHECKED,
+    STAGE_UNIT_LABEL_SAVED,
+    STAGE_COMPLETED,
+    STAGE_FAILED,
+    STATUS_RUNNING,
+    STATUS_SUCCESS,
+    STATUS_FAIL
 )
 
 
@@ -31,74 +48,76 @@ def process_raw_metadata(db, payload: dict):
 
     response_data = {}
 
-    # =========================
-    # ingestion_job 최초 생성
-    # =========================
-    upsert_ingestion_job(
-        db=db,
-        trace_id=trace_id,
-        system_name=system_name,
-        label_no=payload.get("label_no"),
-        order_no=payload.get("order_no"),
-        process_stage="INGEST_RECEIVED",
-        process_status="PROCESSING",
-        retry_count=0,
-        last_error=None,
-        raw_payload=payload
-    )
-
-    db.commit()
-
     try:
 
-        # =========================
-        # validation
-        # =========================
-        validate_required_fields(payload)
-
-        # =========================
-        # process stage update
-        # =========================
-        upsert_ingestion_job(
+        # =========================================
+        # STEP 1. ingestion_job 생성
+        # =========================================
+        create_ingestion_job(
             db=db,
             trace_id=trace_id,
             system_name=system_name,
-            label_no=payload.get("label_no"),
-            order_no=payload.get("order_no"),
-            process_stage="VALIDATION_COMPLETED",
-            process_status="PROCESSING",
-            retry_count=0,
-            last_error=None,
-            raw_payload=payload
+            payload=payload,
+            process_stage=STAGE_RECEIVED,
+            process_status=STATUS_RUNNING
         )
 
         db.commit()
 
-        # =========================
-        # unit_labels save
-        # =========================
+        # =========================================
+        # STEP 2. validation
+        # =========================================
+        validate_required_fields(payload)
+
+        update_ingestion_job(
+            db=db,
+            trace_id=trace_id,
+            process_stage=STAGE_VALIDATED,
+            process_status=STATUS_RUNNING
+        )
+
+        db.commit()
+
+        # =========================================
+        # STEP 3. master validation
+        # =========================================
+        validate_master_data(payload)
+
+        update_ingestion_job(
+            db=db,
+            trace_id=trace_id,
+            process_stage=STAGE_MASTER_CHECKED,
+            process_status=STATUS_RUNNING
+        )
+
+        db.commit()
+
+        # =========================================
+        # STEP 4. unit_labels 저장
+        # =========================================
         save_unit_label(
             db=db,
             payload=payload,
             trace_id=trace_id
         )
 
-        db.commit()
-
-        # =========================
-        # 성공 상태 반영
-        # =========================
-        upsert_ingestion_job(
+        update_ingestion_job(
             db=db,
             trace_id=trace_id,
-            system_name=system_name,
-            label_no=payload.get("label_no"),
-            order_no=payload.get("order_no"),
-            process_stage="UNIT_LABEL_SAVED",
-            process_status="SUCCESS",
-            retry_count=0,
-            last_error=None,
-            raw_payload=payload
+            process_stage=STAGE_UNIT_LABEL_SAVED,
+            process_status=STATUS_RUNNING
+        )
+
+        db.commit()
+
+        # =========================================
+        # STEP 5. 완료 처리
+        # =========================================
+        update_ingestion_job(
+            db=db,
+            trace_id=trace_id,
+            process_stage=STAGE_COMPLETED,
+            process_status=STATUS_SUCCESS
         )
 
         db.commit()
@@ -121,23 +140,20 @@ def process_raw_metadata(db, payload: dict):
         else:
             status_code = "500"
 
-        # =========================
-        # 실패 상태 반영
-        # =========================
-        upsert_ingestion_job(
-            db=db,
-            trace_id=trace_id,
-            system_name=system_name,
-            label_no=payload.get("label_no"),
-            order_no=payload.get("order_no"),
-            process_stage="FAILED",
-            process_status="FAIL",
-            retry_count=0,
-            last_error=str(e),
-            raw_payload=payload
-        )
+        try:
 
-        db.commit()
+            update_ingestion_job(
+                db=db,
+                trace_id=trace_id,
+                process_stage=STAGE_FAILED,
+                process_status=STATUS_FAIL,
+                last_error=str(e)
+            )
+
+            db.commit()
+
+        except Exception:
+            db.rollback()
 
         response_data = {
             "status": "error",

@@ -44,7 +44,7 @@ def save_unit_label(db, payload: dict, trace_id: str):
         "c_id": payload.get("container_id"),
         "p_code": payload.get("product_code"),
         "cust": payload.get("cust_code"),
-        "raw": json.dumps(payload),
+        "raw": json.dumps(payload, default=str),
         "trace": trace_id,
         "now": datetime.datetime.now()
     })
@@ -88,8 +88,8 @@ def save_external_audit(
 
     db.execute(audit_query, {
         "sys": system_name,
-        "req": json.dumps(request_payload),
-        "res": json.dumps(response_payload),
+        "req": json.dumps(request_payload, default=str),
+        "res": json.dumps(response_payload, default=str),
         "status": status_code,
         "success": is_success,
         "latency": latency_ms,
@@ -99,19 +99,15 @@ def save_external_audit(
 
 
 # =========================================
-# ingestion_job UPSERT
+# ingestion_job 생성
 # =========================================
-def upsert_ingestion_job(
+def create_ingestion_job(
     db,
     trace_id,
     system_name,
-    label_no,
-    order_no,
+    payload,
     process_stage,
-    process_status,
-    retry_count,
-    last_error,
-    raw_payload
+    process_status
 ):
 
     query = """
@@ -134,8 +130,8 @@ def upsert_ingestion_job(
             :order_no,
             :process_stage,
             :process_status,
-            :retry_count,
-            :last_error,
+            0,
+            NULL,
             :raw_payload,
             :created_at,
             :updated_at
@@ -143,9 +139,6 @@ def upsert_ingestion_job(
         ON DUPLICATE KEY UPDATE
             process_stage = :process_stage,
             process_status = :process_status,
-            retry_count = :retry_count,
-            last_error = :last_error,
-            raw_payload = :raw_payload,
             updated_at = :updated_at
     """
 
@@ -154,13 +147,11 @@ def upsert_ingestion_job(
     db.execute(query, {
         "trace_id": trace_id,
         "system_name": system_name,
-        "label_no": label_no,
-        "order_no": order_no,
+        "label_no": payload.get("label_no"),
+        "order_no": payload.get("order_no"),
         "process_stage": process_stage,
         "process_status": process_status,
-        "retry_count": retry_count,
-        "last_error": last_error,
-        "raw_payload": json.dumps(raw_payload),
+        "raw_payload": json.dumps(payload, default=str),
         "created_at": now,
         "updated_at": now
     })
@@ -194,15 +185,19 @@ def update_ingestion_job(
     }
 
     if retry_count is not None:
+
         query += """
             , retry_count = :retry_count
         """
+
         params["retry_count"] = retry_count
 
     if last_error is not None:
+
         query += """
             , last_error = :last_error
         """
+
         params["last_error"] = last_error
 
     query += """
@@ -224,14 +219,10 @@ def get_ingestion_job_by_trace_id(
         SELECT
             id,
             trace_id,
-            system_name,
-            label_no,
-            order_no,
             process_stage,
             process_status,
             retry_count,
             last_error,
-            raw_payload,
             created_at,
             updated_at
         FROM ingestion_job
@@ -254,10 +245,7 @@ def get_failed_ingestion_jobs(db):
         SELECT
             trace_id,
             retry_count,
-            raw_payload,
-            process_stage,
-            process_status,
-            last_error
+            raw_payload
         FROM ingestion_job
         WHERE process_status = 'FAIL'
     """
@@ -265,3 +253,39 @@ def get_failed_ingestion_jobs(db):
     result = db.execute(query)
 
     return result.fetchall()
+    
+# =========================================
+# retry_count 증가
+# =========================================
+def increase_retry_count(db, trace_id):
+
+    query = """
+        UPDATE ingestion_job
+        SET
+            retry_count = retry_count + 1,
+            updated_at = :updated_at
+        WHERE trace_id = :trace_id
+    """
+
+    db.execute(query, {
+        "trace_id": trace_id,
+        "updated_at": datetime.datetime.now()
+    })
+
+
+# =========================================
+# raw_payload 조회
+# =========================================
+def get_raw_payload_by_trace_id(db, trace_id):
+
+    query = """
+        SELECT raw_payload
+        FROM ingestion_job
+        WHERE trace_id = :trace_id
+    """
+
+    result = db.execute(query, {
+        "trace_id": trace_id
+    }).fetchone()
+
+    return result
