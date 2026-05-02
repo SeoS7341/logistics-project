@@ -3,6 +3,10 @@
 import json
 import datetime
 
+from db.repository_event_history import (
+    save_event_history
+)
+
 
 # =========================================
 # unit_labels UPSERT
@@ -156,6 +160,17 @@ def create_ingestion_job(
         "updated_at": now
     })
 
+    # =========================================
+    # event history 저장
+    # =========================================
+    save_event_history(
+        db=db,
+        trace_id=trace_id,
+        process_stage=process_stage,
+        process_status=process_status,
+        message=None
+    )
+
 
 # =========================================
 # ingestion_job 상태 업데이트
@@ -206,6 +221,17 @@ def update_ingestion_job(
 
     db.execute(query, params)
 
+    # =========================================
+    # event history 저장
+    # =========================================
+    save_event_history(
+        db=db,
+        trace_id=trace_id,
+        process_stage=process_stage,
+        process_status=process_status,
+        message=last_error
+    )
+
 
 # =========================================
 # ingestion_job 조회
@@ -253,7 +279,8 @@ def get_failed_ingestion_jobs(db):
     result = db.execute(query)
 
     return result.fetchall()
-    
+
+
 # =========================================
 # retry_count 증가
 # =========================================

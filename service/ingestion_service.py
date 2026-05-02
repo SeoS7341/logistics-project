@@ -81,7 +81,10 @@ def process_raw_metadata(db, payload: dict):
         # =========================================
         # STEP 3. master validation
         # =========================================
-        validate_master_data(payload)
+        validate_master_data(
+            db=db,
+            payload=payload
+        )
 
         update_ingestion_job(
             db=db,

@@ -13,6 +13,10 @@ from db.repository_ingestion import (
     get_raw_payload_by_trace_id
 )
 
+from db.repository_dlq import (
+    insert_dead_letter
+)
+
 from service.ingestion_service import (
     process_raw_metadata
 )
@@ -78,6 +82,9 @@ def retry_failed_trace(
 
     db.commit()
 
+    # =========================================
+    # raw_payload 조회
+    # =========================================
     payload_result = get_raw_payload_by_trace_id(
         db=db,
         trace_id=trace_id
@@ -121,17 +128,24 @@ def retry_failed_trace(
         if retry_count >= MAX_RETRY:
             next_status = STATUS_DEAD
 
-        update_ingestion_job(
-            db=db,
-            trace_id=trace_id,
-            process_stage=STAGE_FAILED,
-            process_status=next_status,
-            retry_count=retry_count,
-            last_error=str(e)
-        )
+        # =========================================
+        # DEAD 전환시에만 상태 변경
+        # =========================================
+        if next_status == STATUS_DEAD:
+            update_ingestion_job(
+                db=db,
+                trace_id=trace_id,
+                process_stage=STAGE_FAILED,
+                process_status=STATUS_DEAD,
+                retry_count=retry_count,
+                last_error=str(e)
+            )
 
-        db.commit()
+            db.commit()
 
+        # =========================================
+        # retry history 저장
+        # =========================================
         save_retry_history(
             db=db,
             trace_id=trace_id,
@@ -140,5 +154,19 @@ def retry_failed_trace(
         )
 
         db.commit()
+
+        # =========================================
+        # DLQ 적재
+        # =========================================
+        if next_status == STATUS_DEAD:
+
+            insert_dead_letter(
+                db=db,
+                trace_id=trace_id,
+                reason=str(e),
+                raw_payload=payload
+            )
+
+            db.commit()
 
         raise e
